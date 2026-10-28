@@ -14,6 +14,10 @@ const (
 	AlertLevelError   = 2
 )
 
+// ssl3AlertNoCertificate is the SSLv3-only no_certificate alert (RFC 6101,
+// Section 5.4), sent by an SSLv3 client that has no certificate to send.
+const ssl3AlertNoCertificate = 41
+
 const (
 	AlertCloseNotify                  Alert = 0
 	AlertUnexpectedMessage            Alert = 10

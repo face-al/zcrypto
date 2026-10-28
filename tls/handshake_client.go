@@ -240,12 +240,12 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, map[CurveID]tls13KeyShare, er
 		return nil, nil, errors.New("tls: NextProtos values too large")
 	}
 
-	supportedVersions := config.supportedVersions()
+	supportedVersions := config.supportedVersions(true)
 	if len(supportedVersions) == 0 {
 		return nil, nil, errors.New("tls: no supported versions satisfy MinVersion and MaxVersion")
 	}
 
-	clientHelloVersion := config.maxSupportedVersion()
+	clientHelloVersion := config.maxSupportedVersion(true)
 	// The version at the beginning of the ClientHello was capped at TLS 1.2
 	// for compatibility reasons. The supported_versions extension is used
 	// to negotiate versions now. See RFC 8446, Section 4.2.1.
@@ -399,7 +399,7 @@ func (c *Conn) clientHandshake() (err error) {
 						break
 					}
 				}
-				versOk := candidateSession.vers >= c.config.minSupportedVersion() &&
+				versOk := candidateSession.vers >= c.config.minSupportedVersion(true) &&
 					candidateSession.vers <= c.config.ClientFingerprintConfiguration.HandshakeVersion
 				if versOk && cipherSuiteOk {
 					session = candidateSession
@@ -517,7 +517,7 @@ func (c *Conn) clientHandshake() (err error) {
 	// If we are negotiating a protocol version that's lower than what we
 	// support, check for the server downgrade canaries.
 	// See RFC 8446, Section 4.1.3.
-	maxVers := c.config.maxSupportedVersion()
+	maxVers := c.config.maxSupportedVersion(true)
 	tls12Downgrade := string(serverHello.random[24:]) == downgradeCanaryTLS12
 	tls11Downgrade := string(serverHello.random[24:]) == downgradeCanaryTLS11
 	if maxVers == VersionTLS13 && c.vers <= VersionTLS12 && (tls12Downgrade || tls11Downgrade) ||
@@ -691,7 +691,7 @@ func (c *Conn) pickTLSVersion(serverHello *serverHelloMsg) error {
 		peerVersion = serverHello.supportedVersion
 	}
 
-	vers, ok := c.config.mutualVersion([]uint16{peerVersion})
+	vers, ok := c.config.mutualVersion(true, []uint16{peerVersion})
 	if !ok {
 		c.sendAlert(AlertProtocolVersion)
 		return fmt.Errorf("tls: server selected unsupported protocol version %x", peerVersion)
@@ -788,6 +788,11 @@ func (hs *clientHandshakeState) pickCipherSuite() error {
 	if hs.suite = mutualCipherSuite(hs.hello.cipherSuites, hs.serverHello.cipherSuite); hs.suite == nil {
 		hs.c.sendAlert(AlertHandshakeFailure)
 		return errors.New("tls: server chose an unconfigured cipher suite")
+	}
+
+	if hs.c.vers == VersionSSL30 && (hs.suite.flags&suiteTLS12 != 0 || hs.suite.aead != nil) {
+		hs.c.sendAlert(AlertHandshakeFailure)
+		return errors.New("tls: server chose a cipher suite that is not defined for SSLv3")
 	}
 
 	hs.c.cipherSuite = hs.suite.id
@@ -904,7 +909,15 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 	// If the server requested a certificate then we have to send a
 	// Certificate message, even if it's empty because we don't have a
 	// certificate to send.
-	if certRequested {
+	if certRequested && c.vers == VersionSSL30 && len(chainToSend.Certificate) == 0 {
+		// SSLv3 has no empty Certificate message: a client without a
+		// certificate sends a no_certificate warning alert instead (RFC
+		// 6101, Sections 5.4 and 5.6.6). The alert is not part of the
+		// Finished transcript.
+		if _, err := c.WriteRecord(recordTypeAlert, []byte{AlertLevelWarning, ssl3AlertNoCertificate}); err != nil {
+			return err
+		}
+	} else if certRequested {
 		certMsg = new(certificateMsg)
 		certMsg.certificates = chainToSend.Certificate
 		hs.finishedHash.Write(certMsg.marshal())
@@ -960,7 +973,12 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 			}
 		}
 
-		signed := hs.finishedHash.hashForClientCertificate(sigType, sigHash, hs.masterSecret)
+		var signed []byte
+		signed, err = hs.finishedHash.hashForClientCertificate(sigType, sigHash, hs.masterSecret)
+		if err != nil {
+			c.sendAlert(AlertInternalError)
+			return err
+		}
 		signOpts := crypto.SignerOpts(sigHash)
 		if sigType == signatureRSAPSS {
 			signOpts = &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: sigHash}
@@ -997,9 +1015,23 @@ func (hs *clientHandshakeState) establishKeys() error {
 	var clientHash, serverHash hash.Hash
 	if hs.suite.cipher != nil {
 		clientCipher = hs.suite.cipher(clientKey, clientIV, false /* not for reading */)
-		clientHash = hs.suite.mac(clientMAC)
 		serverCipher = hs.suite.cipher(serverKey, serverIV, true /* for reading */)
-		serverHash = hs.suite.mac(serverMAC)
+		if c.vers == VersionSSL30 {
+			clientMAC30, err := newSSL30MAC(hs.suite.macLen, clientMAC)
+			if err != nil {
+				c.sendAlert(AlertInternalError)
+				return err
+			}
+			serverMAC30, err := newSSL30MAC(hs.suite.macLen, serverMAC)
+			if err != nil {
+				c.sendAlert(AlertInternalError)
+				return err
+			}
+			clientHash, serverHash = clientMAC30, serverMAC30
+		} else {
+			clientHash = hs.suite.mac(clientMAC)
+			serverHash = hs.suite.mac(serverMAC)
+		}
 	} else {
 		clientCipher = hs.suite.aead(clientKey, clientIV)
 		serverCipher = hs.suite.aead(serverKey, serverIV)

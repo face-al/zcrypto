@@ -10,6 +10,7 @@ import (
 	"crypto/cipher"
 	"crypto/des"
 	"crypto/hmac"
+	"crypto/md5"
 	"crypto/rc4"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -554,8 +555,67 @@ func tls10MAC(h hash.Hash, out, seq, header, data, extra []byte) []byte {
 	return res
 }
 
+// ssl30MAC implements the SSLv3 record MAC (RFC 6101, Section 5.2.3.1):
+//
+//	hash(MAC_write_secret + pad_2 +
+//	     hash(MAC_write_secret + pad_1 + seq_num + type + length + content))
+//
+// pad_1/pad_2 are 0x36/0x5c repeated 48 times for MD5 and 40 times for SHA.
+// Unlike the TLS HMAC, the protocol version is not part of the MAC input. It
+// embeds the raw hash only so that it fits the hash.Hash slot of halfConn;
+// the record layer calls MAC, never Write/Sum. Ported from Go 1.13 crypto/tls;
+// like there, no constant-time guarantees are given (POODLE makes them moot).
+type ssl30MAC struct {
+	hash.Hash
+	key []byte
+}
+
+var ssl30Pad1 = [48]byte{0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36}
+
+var ssl30Pad2 = [48]byte{0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c}
+
+// newSSL30MAC returns the SSLv3 MAC for a cipher suite with the given MAC
+// length: 16 = MD5, 20 = SHA-1. SSLv3 defines no other MAC.
+func newSSL30MAC(macLen int, key []byte) (*ssl30MAC, error) {
+	var h hash.Hash
+	switch macLen {
+	case md5.Size:
+		h = md5.New()
+	case sha1.Size:
+		h = sha1.New()
+	default:
+		return nil, fmt.Errorf("tls: no SSLv3 MAC with length %d", macLen)
+	}
+	return &ssl30MAC{Hash: h, key: append([]byte(nil), key...)}, nil
+}
+
+// MAC appends the SSLv3 MAC of data to out. header is the 5-byte record
+// header; only its type (byte 0) and length (bytes 3-4) are MACed.
+func (s *ssl30MAC) MAC(out, seq, header, data []byte) []byte {
+	padLength := 48
+	if s.Hash.Size() == sha1.Size {
+		padLength = 40
+	}
+
+	s.Hash.Reset()
+	s.Hash.Write(s.key)
+	s.Hash.Write(ssl30Pad1[:padLength])
+	s.Hash.Write(seq)
+	s.Hash.Write(header[:1])
+	s.Hash.Write(header[3:5])
+	s.Hash.Write(data)
+	inner := s.Hash.Sum(nil)
+
+	s.Hash.Reset()
+	s.Hash.Write(s.key)
+	s.Hash.Write(ssl30Pad2[:padLength])
+	s.Hash.Write(inner)
+	return s.Hash.Sum(out)
+}
+
 func rsaKA(version uint16) keyAgreement {
 	return &rsaKeyAgreement{
+		version: version,
 		auth: &signedKeyAgreement{
 			sigType: signatureRSA,
 			version: version,

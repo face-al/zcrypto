@@ -321,6 +321,32 @@ func extractPadding(payload []byte) (toRemove int, good byte) {
 	return
 }
 
+// extractPaddingSSL30 replaces extractPadding for SSLv3 (RFC 6101, Section
+// 5.2.3.2): the padding bytes are arbitrary and only the length byte, which
+// must leave room for itself within the payload, is checked. Ported from Go
+// 1.13 crypto/tls.
+func extractPaddingSSL30(payload []byte) (toRemove int, good byte) {
+	if len(payload) < 1 {
+		return 0, 0
+	}
+
+	paddingLen := int(payload[len(payload)-1]) + 1
+	if paddingLen > len(payload) {
+		return 0, 0
+	}
+
+	return paddingLen, 255
+}
+
+// recordMAC computes the record MAC with the MAC function of the halfConn's
+// version: the SSLv3 MAC (RFC 6101, Section 5.2.3.1) or the TLS HMAC.
+func (hc *halfConn) recordMAC(header, data, extra []byte) []byte {
+	if m, ok := hc.mac.(*ssl30MAC); ok {
+		return m.MAC(hc.scratchBuf[:0], hc.seq[:], header, data)
+	}
+	return tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], header, data, extra)
+}
+
 func roundUp(a, b int) int {
 	return a + (b-a%b)%b
 }
@@ -397,7 +423,11 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 			// computing the digest. This makes the MAC roughly constant time as
 			// long as the digest computation is constant time and does not
 			// affect the subsequent write, modulo cache effects.
-			paddingLen, paddingGood = extractPadding(payload)
+			if hc.version == VersionSSL30 {
+				paddingLen, paddingGood = extractPaddingSSL30(payload)
+			} else {
+				paddingLen, paddingGood = extractPadding(payload)
+			}
 		default:
 			panic("unknown cipher type")
 		}
@@ -436,7 +466,7 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 		record[3] = byte(n >> 8)
 		record[4] = byte(n)
 		remoteMAC := payload[n : n+macSize]
-		localMAC := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload[:n], payload[n+macSize:])
+		localMAC := hc.recordMAC(record[:recordHeaderLen], payload[:n], payload[n+macSize:])
 
 		// This is equivalent to checking the MACs and paddingGood
 		// separately, but in constant-time to prevent distinguishing
@@ -502,7 +532,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 	var dst []byte
 	switch c := hc.cipher.(type) {
 	case cipher.Stream:
-		mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
+		mac := hc.recordMAC(record[:recordHeaderLen], payload, nil)
 		record, dst = sliceForAppend(record, len(payload)+len(mac))
 		c.XORKeyStream(dst[:len(payload)], payload)
 		c.XORKeyStream(dst[len(payload):], mac)
@@ -531,7 +561,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 			record = c.Seal(record, nonce, payload, additionalData)
 		}
 	case cbcMode:
-		mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
+		mac := hc.recordMAC(record[:recordHeaderLen], payload, nil)
 		blockSize := c.BlockSize()
 		plaintextLen := len(payload) + len(mac)
 		paddingLen := blockSize - plaintextLen%blockSize
@@ -1152,7 +1182,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 	// https://bugzilla.mozilla.org/show_bug.cgi?id=665814
 	// https://www.imperialviolet.org/2012/01/15/beastfollowup.html
 	var m int
-	if len(b) > 1 && c.vers == VersionTLS10 &&
+	if len(b) > 1 && c.vers <= VersionTLS10 &&
 		(c.config == nil || !c.config.DisableTLS10BEASTMitigation) {
 		if _, ok := c.out.cipher.(cipher.BlockMode); ok {
 			n, err := c.writeRecordLocked(recordTypeApplicationData, b[:1])
