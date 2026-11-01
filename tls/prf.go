@@ -324,11 +324,11 @@ func (h finishedHash) hashForClientCertificate(sigType uint8, hashAlg crypto.Has
 		// for scanning, without client certificates.
 		return nil, errors.New("tls: client certificates are not supported in SSLv3")
 	}
-	if (h.version >= VersionTLS12 || sigType == signatureEd25519) && h.buffer == nil {
+	if (h.version >= VersionTLS12 || isDirectSigning(sigType)) && h.buffer == nil {
 		panic("tls: handshake hash for a client certificate requested after discarding the handshake buffer")
 	}
 
-	if sigType == signatureEd25519 {
+	if isDirectSigning(sigType) {
 		return h.buffer, nil
 	}
 

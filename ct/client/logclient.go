@@ -5,21 +5,21 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/mreiferson/go-httpclient"
 	"github.com/zmap/zcrypto/ct"
-	"golang.org/x/net/context"
 )
 
 // URI paths for CT Log endpoints
@@ -37,10 +37,10 @@ type LogClient struct {
 	httpClient *http.Client // used to interact with the log via HTTP
 }
 
-//////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////
 // JSON structures follow.
 // These represent the structures returned by the CT Log server.
-//////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////
 
 // addChainRequest represents the JSON request body sent to the add-chain CT
 // method.
@@ -62,7 +62,7 @@ type addChainResponse struct {
 // addJSONRequest represents the JSON request body sent ot the add-json CT
 // method.
 type addJSONRequest struct {
-	Data interface{} `json:"data"`
+	Data any `json:"data"`
 }
 
 // getSTHResponse respresents the JSON response to the get-sth CT method
@@ -113,38 +113,40 @@ type getEntryAndProofResponse struct {
 func New(uri string) *LogClient {
 	var c LogClient
 	c.Uri = uri
-	transport := &httpclient.Transport{
-		ConnectTimeout:        10 * time.Second,
-		RequestTimeout:        30 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		MaxIdleConnsPerHost:   10,
-		DisableKeepAlives:     false,
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout: 10 * time.Second,
+	}).DialContext
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	transport.MaxIdleConnsPerHost = 10
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
+	c.httpClient = &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
 	}
-	c.httpClient = &http.Client{Transport: transport}
 	return &c
 }
 
 // Makes a HTTP call to |uri|, and attempts to parse the response as a JSON
 // representation of the structure in |res|.
 // Returns a non-nil |error| if there was a problem.
-func (c *LogClient) fetchAndParse(uri string, res interface{}) error {
+func (c *LogClient) fetchAndParse(uri string, res any) error {
 	req, err := http.NewRequest("GET", uri, nil)
 	if err != nil {
 		return err
 	}
 	resp, err := c.httpClient.Do(req)
-	var body []byte
-	if resp != nil {
-		if resp.StatusCode > 399 {
-			return errors.New("HTTP error: " + resp.Status)
-		}
-		body, err = ioutil.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return err
-		}
+	if err != nil {
+		return err
 	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		return errors.New("HTTP error: " + resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
@@ -158,7 +160,7 @@ func (c *LogClient) fetchAndParse(uri string, res interface{}) error {
 // Makes a HTTP POST call to |uri|, and attempts to parse the response as a JSON
 // representation of the structure in |res|.
 // Returns a non-nil |error| if there was a problem.
-func (c *LogClient) postAndParse(uri string, req interface{}, res interface{}) (*http.Response, string, error) {
+func (c *LogClient) postAndParse(uri string, req any, res any) (*http.Response, string, error) {
 	postBody, err := json.Marshal(req)
 	if err != nil {
 		return nil, "", err
@@ -167,24 +169,22 @@ func (c *LogClient) postAndParse(uri string, req interface{}, res interface{}) (
 	if err != nil {
 		return nil, "", err
 	}
-	//httpReq.Header.Set("Keep-Alive", "timeout=15, max=100")
+	// httpReq.Header.Set("Keep-Alive", "timeout=15, max=100")
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return resp, "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
 	// Read all of the body, if there is one, so that the http.Client can do
 	// Keep-Alive:
-	var body []byte
-	if resp != nil {
-		body, err = ioutil.ReadAll(resp.Body)
-		resp.Body.Close()
-	}
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return resp, string(body), err
 	}
-	if resp.StatusCode == 200 {
-		if err != nil {
-			return resp, string(body), err
-		}
-		if err = json.Unmarshal(body, &res); err != nil {
+	if resp.StatusCode == http.StatusOK {
+		if err := json.Unmarshal(body, res); err != nil {
 			return resp, string(body), err
 		}
 	}
@@ -292,7 +292,7 @@ func (c *LogClient) AddChainWithContext(ctx context.Context, chain []ct.ASN1Cert
 	return c.addChainWithRetry(ctx, AddChainPath, chain)
 }
 
-func (c *LogClient) AddJSON(data interface{}) (*ct.SignedCertificateTimestamp, error) {
+func (c *LogClient) AddJSON(data any) (*ct.SignedCertificateTimestamp, error) {
 	req := addJSONRequest{
 		Data: data,
 	}
