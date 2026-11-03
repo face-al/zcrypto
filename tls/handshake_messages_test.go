@@ -162,7 +162,8 @@ func (*clientHelloMsg) Generate(rand *rand.Rand, size int) reflect.Value {
 		m.secureRenegotiationSupported = true
 		m.secureRenegotiation = randomBytes(rand.Intn(50)+1, rand)
 	}
-	for i := 0; i < rand.Intn(5); i++ {
+	// supported_versions is only sent with a TLS 1.2+ legacy_version
+	for i := 0; m.vers >= VersionTLS12 && i < rand.Intn(5); i++ {
 		m.supportedVersions = append(m.supportedVersions, uint16(rand.Intn(0xffff)+1))
 	}
 	if rand.Intn(10) > 5 {

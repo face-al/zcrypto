@@ -574,9 +574,13 @@ func (m *clientKeyExchangeMsg) MakeLog(ka keyAgreement) *ClientKeyExchange {
 	switch ka := ka.(type) {
 	case *rsaKeyAgreement:
 		ckx.RSAParams = new(jsonKeys.RSAClientParams)
-		ckx.RSAParams.Length = uint16(len(m.ciphertext) - 2) // First 2 bytes are length
-		ckx.RSAParams.EncryptedPMS = make([]byte, len(m.ciphertext)-2)
-		copy(ckx.RSAParams.EncryptedPMS, m.ciphertext[2:])
+		encrypted := m.ciphertext
+		if ka.version != VersionSSL30 && len(encrypted) >= 2 {
+			encrypted = encrypted[2:] // First 2 bytes are length (TLS only)
+		}
+		ckx.RSAParams.Length = uint16(len(encrypted))
+		ckx.RSAParams.EncryptedPMS = make([]byte, len(encrypted))
+		copy(ckx.RSAParams.EncryptedPMS, encrypted)
 	// Premaster-Secret is available in KeyMaterial record
 	case *dheKeyAgreement:
 		ckx.DHParams = ka.ClientDHParams()

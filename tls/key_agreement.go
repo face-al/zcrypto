@@ -198,6 +198,10 @@ func (ka *signedKeyAgreement) verifyParameters(config *Config, clientHello *clie
 type rsaKeyAgreement struct {
 	auth keyAgreementAuthentication
 
+	// version is the negotiated protocol version; SSLv3 encodes the
+	// EncryptedPreMasterSecret without a length prefix.
+	version uint16
+
 	verifyError error
 }
 
@@ -256,6 +260,12 @@ func (ka *rsaKeyAgreement) generateClientKeyExchange(config *Config, clientHello
 		return nil, nil, err
 	}
 	ckx := new(clientKeyExchangeMsg)
+	if ka.version == VersionSSL30 {
+		// SSLv3 sends the bare RSA ciphertext (RFC 6101, Section 5.6.7.1);
+		// the 2-byte length prefix is TLS only (RFC 5246, Section 7.4.7.1).
+		ckx.ciphertext = encrypted
+		return preMasterSecret, ckx, nil
+	}
 	ckx.ciphertext = make([]byte, len(encrypted)+2)
 	ckx.ciphertext[0] = byte(len(encrypted) >> 8)
 	ckx.ciphertext[1] = byte(len(encrypted))

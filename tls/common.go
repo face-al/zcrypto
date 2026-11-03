@@ -39,8 +39,10 @@ const (
 	VersionTLS12 = 0x0303
 	VersionTLS13 = 0x0304
 
-	// Deprecated: SSLv3 is cryptographically broken, and is no longer
-	// supported by this package. See golang.org/issue/32716.
+	// Deprecated: SSLv3 is cryptographically broken (golang.org/issue/32716).
+	// It is never negotiated by default. A client offers and accepts it only
+	// when Config.MinVersion is explicitly set to VersionSSL30; servers never
+	// negotiate it.
 	VersionSSL30 = 0x0300
 )
 
@@ -1303,8 +1305,11 @@ var supportedVersions = []uint16{
 	VersionTLS10,
 }
 
-func (c *Config) supportedVersions() []uint16 {
-	versions := make([]uint16, 0, len(supportedVersions))
+// supportedVersions returns the versions enabled by c, highest first. SSLv3 is
+// only included on the client side and only when MinVersion is explicitly
+// VersionSSL30.
+func (c *Config) supportedVersions(isClient bool) []uint16 {
+	versions := make([]uint16, 0, len(supportedVersions)+1)
 	for _, v := range supportedVersions {
 		if c != nil && c.MinVersion != 0 && v < c.MinVersion {
 			continue
@@ -1314,19 +1319,23 @@ func (c *Config) supportedVersions() []uint16 {
 		}
 		versions = append(versions, v)
 	}
+	if isClient && c != nil && c.MinVersion == VersionSSL30 &&
+		(c.MaxVersion == 0 || c.MaxVersion >= VersionSSL30) {
+		versions = append(versions, VersionSSL30)
+	}
 	return versions
 }
 
-func (c *Config) minSupportedVersion() uint16 {
-	supportedVersions := c.supportedVersions()
+func (c *Config) minSupportedVersion(isClient bool) uint16 {
+	supportedVersions := c.supportedVersions(isClient)
 	if len(supportedVersions) == 0 {
 		return 0
 	}
 	return supportedVersions[len(supportedVersions)-1]
 }
 
-func (c *Config) maxSupportedVersion() uint16 {
-	supportedVersions := c.supportedVersions()
+func (c *Config) maxSupportedVersion(isClient bool) uint16 {
+	supportedVersions := c.supportedVersions(isClient)
 	if len(supportedVersions) == 0 {
 		return 0
 	}
@@ -1373,8 +1382,8 @@ func (c *Config) supportsCurve(curve CurveID) bool {
 
 // mutualVersion returns the protocol version to use given the advertised
 // versions of the peer. Priority is given to the peer preference order.
-func (c *Config) mutualVersion(peerVersions []uint16) (uint16, bool) {
-	supportedVersions := c.supportedVersions()
+func (c *Config) mutualVersion(isClient bool, peerVersions []uint16) (uint16, bool) {
+	supportedVersions := c.supportedVersions(isClient)
 	for _, peerVersion := range peerVersions {
 		for _, v := range supportedVersions {
 			if v == peerVersion {
@@ -1453,7 +1462,7 @@ func (chi *ClientHelloInfo) SupportsCertificate(c *Certificate) error {
 	if config == nil {
 		config = &Config{}
 	}
-	vers, ok := config.mutualVersion(chi.SupportedVersions)
+	vers, ok := config.mutualVersion(false, chi.SupportedVersions)
 	if !ok {
 		return errors.New("no mutually supported protocol versions")
 	}
