@@ -238,7 +238,12 @@ func (m *clientHelloMsg) marshal() []byte {
 				b.AddUint16(extensionSCT)
 				b.AddUint16(0) // empty extension_data
 			}
-			if len(m.supportedVersions) > 0 {
+			// RFC 8446, Section 4.2.1: with the extension, legacy_version must be
+			// 0x0303. A client capped below TLS 1.2 (SSLv3, TLS 1.0, TLS 1.1 only)
+			// sends no extension, like the clients of those versions; OpenSSL 1.1.1
+			// rejects supported_versions next to a 0x0300 legacy_version
+			// ("bad legacy version").
+			if len(m.supportedVersions) > 0 && m.vers >= VersionTLS12 {
 				// RFC 8446, Section 4.2.1
 				b.AddUint16(extensionSupportedVersions)
 				b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {

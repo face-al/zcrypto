@@ -197,3 +197,24 @@ func TestRSAClientKeyExchangeSSL30(t *testing.T) {
 		}
 	}
 }
+
+// TestClientHelloSupportedVersionsBelowTLS12: a client capped at SSLv3, TLS 1.0
+// or TLS 1.1 sends no supported_versions (RFC 8446, Section 4.2.1 requires a
+// 0x0303 legacy_version with it; OpenSSL 1.1.1 answers "bad legacy version").
+func TestClientHelloSupportedVersionsBelowTLS12(t *testing.T) {
+	for _, tc := range []struct {
+		vers uint16
+		want bool
+	}{{VersionSSL30, false}, {VersionTLS10, false}, {VersionTLS11, false}, {VersionTLS12, true}} {
+		m := &clientHelloMsg{vers: tc.vers, random: make([]byte, 32), cipherSuites: []uint16{TLS_RSA_WITH_AES_128_CBC_SHA},
+			compressionMethods: []uint8{compressionNone}, supportedVersions: []uint16{tc.vers}}
+		raw := m.marshal()
+		var parsed clientHelloMsg
+		if !parsed.unmarshal(raw) {
+			t.Fatalf("%x: unmarshal failed", tc.vers)
+		}
+		if got := len(parsed.supportedVersions) > 0; got != tc.want {
+			t.Errorf("%x: supported_versions sent = %v, want %v", tc.vers, got, tc.want)
+		}
+	}
+}
